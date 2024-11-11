@@ -1,0 +1,22 @@
+graph TB
+    subgraph Supervisory["Supervisory Layer"]
+        SCADA["SCADA System"]
+        HMI["HMI Interface"]
+    end
+
+    subgraph Control["Control Layer"]
+        PLCs["PLCs"]
+    end
+
+    subgraph Field["Field Layer"]
+        Devices["Sensors & Actuators"]
+    end
+
+    %% Protocol Labels
+    SCADA <--> |"OPC UA"| PLCs
+    SCADA <-.-> |"MQTT"| Devices
+    PLCs <--> |"Modbus TCP"| Devices
+    HMI <--> |"OPC UA"| SCADA
+
+    classDef protocol fill:#f9f,stroke:#333,stroke-width:2px
+    class MQTT,OPC,Modbus protocol

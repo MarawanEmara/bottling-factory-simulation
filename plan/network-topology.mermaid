@@ -1,0 +1,43 @@
+graph TB
+    subgraph Supervisory["Supervisory Layer"]
+        SCADA["SCADA System"]
+        HMI["HMI Interface"]
+    end
+
+    subgraph Control["Control Layer"]
+        FillPLC["Filling PLC"]
+        CapPLC["Capping PLC"]
+        LabelPLC["Labeling PLC"]
+        ConvPLC["Conveyor PLC"]
+    end
+
+    subgraph Field["Field Layer"]
+        subgraph Sensors
+            LS["Level Sensors"]
+            PS["Proximity Sensors"]
+            TS["Temperature Sensors"]
+        end
+        subgraph Actuators
+            V["Valves"]
+            CM["Conveyor Motor"]
+            CA["Capping Actuator"]
+            LM["Labeling Motor"]
+        end
+    end
+
+    %% Supervisory Layer Connections
+    SCADA <--> HMI
+    SCADA <--> FillPLC
+    SCADA <--> CapPLC
+    SCADA <--> LabelPLC
+    SCADA <--> ConvPLC
+
+    %% Control Layer to Field Layer Connections
+    FillPLC <--> LS
+    FillPLC <--> V
+    CapPLC <--> PS
+    CapPLC <--> CA
+    LabelPLC <--> PS
+    LabelPLC <--> LM
+    ConvPLC <--> CM
+    ConvPLC <--> PS

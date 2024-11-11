@@ -1,0 +1,21 @@
+sequenceDiagram
+    participant PS as Proximity Sensor
+    participant FP as Filling PLC
+    participant CP as Capping PLC
+    participant LP as Labeling PLC
+    participant SC as SCADA
+
+    PS->>FP: Bottle Detected (Modbus TCP)
+    FP->>SC: Start Fill Operation (OPC UA)
+    Note over FP: Monitors Level Sensor
+    FP->>SC: Fill Complete (OPC UA)
+    
+    PS->>CP: Bottle at Capping (Modbus TCP)
+    CP->>SC: Start Cap Operation (OPC UA)
+    Note over CP: Activates Capping Actuator
+    CP->>SC: Cap Complete (OPC UA)
+    
+    PS->>LP: Bottle at Labeling (Modbus TCP)
+    LP->>SC: Start Label Operation (OPC UA)
+    Note over LP: Controls Label Motor
+    LP->>SC: Label Complete (OPC UA)
