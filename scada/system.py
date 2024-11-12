@@ -5,29 +5,50 @@ import asyncio
 from datetime import datetime
 import logging
 from network.protocols import ModbusManager, MQTTManager, OPCUAManager
+import uuid
+import time
+from config import Config
 
 
 class SCADASystem:
-    def __init__(self, config):
-        self.config = config
+    def __init__(self, config: Config):
+        self.config = config.simulation
         self.running = False
         self.device_states = {}
         self.alarms = []
         self.historical_data = []
 
         # Initialize network managers
-        self.modbus = ModbusManager(config.MODBUS_PORT)
-        self.mqtt = MQTTManager(config.MQTT_BROKER, config.MQTT_PORT)
+        self.modbus = ModbusManager(self.config.MODBUS_PORT)
+        self.mqtt = MQTTManager(self.config.MQTT_BROKER, self.config.MQTT_PORT)
         self.opcua = OPCUAManager()
 
         # Initialize logging
         self.logger = logging.getLogger("SCADA")
         self.logger.setLevel(logging.INFO)
 
+        # Add new monitoring parameters
+        self.monitoring_params = {
+            "level_threshold_high": 95.0,
+            "level_threshold_low": 5.0,
+            "motor_speed_max": 1.2,
+            "stale_data_timeout": 30,
+            "process_timeout": 300,
+        }
+
+        # Add performance metrics
+        self.metrics = {
+            "total_bottles": 0,
+            "successful_bottles": 0,
+            "failed_bottles": 0,
+            "average_cycle_time": 0,
+            "current_throughput": 0,
+        }
+
     async def start(self):
         """Start all communication protocols"""
         tasks = [self.mqtt.start(), self.opcua.start(), self.modbus.start()]
-        
+
         try:
             await asyncio.gather(*tasks)
         except Exception as e:
@@ -75,19 +96,36 @@ class SCADASystem:
     async def _process_sensor_data(self, data: Dict[str, Any]):
         """Process sensor data and generate alarms if needed"""
         sensor_type = data.get("type")
+        sensor_id = data.get("sensor_id")
 
         if sensor_type == "level":
-            # Check fill level limits
             level = data.get("level", 0)
-            if level > 95:
+            if level > self.monitoring_params["level_threshold_high"]:
                 await self._create_alarm(
                     "HIGH_LEVEL",
-                    f"High level detected in {data['sensor_id']}: {level}%",
+                    f"High level detected in {sensor_id}: {level}%",
+                    severity="warning",
                 )
-            elif level < 5:
+            elif level < self.monitoring_params["level_threshold_low"]:
                 await self._create_alarm(
-                    "LOW_LEVEL", f"Low level detected in {data['sensor_id']}: {level}%"
+                    "LOW_LEVEL",
+                    f"Low level detected in {sensor_id}: {level}%",
+                    severity="warning",
                 )
+
+        elif sensor_type == "proximity":
+            # Monitor for stuck bottles
+            if data.get("detected", False):
+                last_change = data.get("last_change", 0)
+                if (
+                    time.time() - last_change
+                    > self.monitoring_params["process_timeout"]
+                ):
+                    await self._create_alarm(
+                        "STUCK_BOTTLE",
+                        f"Bottle stuck at {sensor_id}",
+                        severity="critical",
+                    )
 
     async def _process_actuator_data(self, data: Dict[str, Any]):
         """Process actuator data and check for anomalies"""
@@ -101,16 +139,24 @@ class SCADASystem:
                     "HIGH_SPEED", f"Motor speed exceeds limit in {data['actuator_id']}"
                 )
 
-    async def _create_alarm(self, alarm_type: str, message: str):
+    async def _create_alarm(
+        self, alarm_type: str, message: str, severity: str = "warning"
+    ):
         """Create and store an alarm"""
         alarm = {
+            "id": str(uuid.uuid4()),
             "type": alarm_type,
             "message": message,
+            "severity": severity,
             "timestamp": datetime.now().isoformat(),
             "acknowledged": False,
         }
+
         self.alarms.append(alarm)
-        self.logger.warning(f"Alarm: {message}")
+        self.logger.warning(f"Alarm [{severity}]: {message}")
+
+        # Store in historical data
+        await self._store_historical_data("alarm", alarm)
 
         # Publish alarm to MQTT
         await self.mqtt.publish("factory/alarms", alarm)

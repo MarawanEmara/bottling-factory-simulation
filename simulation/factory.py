@@ -3,10 +3,10 @@
 import time
 from typing import Dict, List, Any
 from queue import Queue
-from threading import Thread, Event
+from asyncio import Event
 import asyncio
 
-from config.settings import SimulationConfig, FactoryLayout
+from config import Config
 from devices.sensors import ProximitySensor, LevelSensor, Sensor
 from devices.actuators import (
     Valve,
@@ -15,12 +15,22 @@ from devices.actuators import (
     LabelingMotor,
     Actuator,
 )
+from devices.handlers import DeviceHandler
+from network.protocols import ModbusManager, OPCUAManager
+from scada.system import SCADASystem
+from simulation.process import BottlingProcess, Bottle, BottleState
+from utils.logging import factory_logger
 
 
 class BottlingFactory:
-    def __init__(self):
-        self.config = SimulationConfig()
-        self.layout = FactoryLayout()
+    def __init__(self, config: Config):
+        self.config = config.simulation
+        self.layout = config.layout
+
+        # Initialize network protocols
+        self.modbus = ModbusManager(self.config.MODBUS_PORT)
+        self.opcua = OPCUAManager()
+        self.scada = SCADASystem(config)
 
         # Initialize components
         self.sensors = self._init_sensors()
@@ -33,6 +43,14 @@ class BottlingFactory:
         # Control flags
         self.running = False
         self.stop_event = Event()
+        self.start_time = time.time()
+
+        # Initialize device handler and process
+        self.device_handler = DeviceHandler(self.scada, self.modbus, self.opcua)
+        self.process = BottlingProcess(self, config, self.device_handler)
+
+        # Initialize metrics tracking
+        self.metrics = {"failed_bottles": 0, "successful_bottles": 0}
 
     def _init_sensors(self) -> Dict[str, Sensor]:
         """Initialize all sensors in the factory"""
@@ -66,6 +84,7 @@ class BottlingFactory:
 
         self.running = True
         self.stop_event.clear()
+        self.start_time = time.time()
 
         # Start the conveyor
         self.actuators["main_conveyor"].activate()
@@ -92,6 +111,9 @@ class BottlingFactory:
             # Add new bottle if it's time
             if current_time - last_bottle_time >= self.config.BOTTLE_INTERVAL:
                 self._add_new_bottle()
+                factory_logger.process(
+                    f"New bottle added: bottle_{self.bottles_produced}"
+                )
                 last_bottle_time = current_time
 
             # Update sensor readings
@@ -112,6 +134,7 @@ class BottlingFactory:
         }
         self.bottles_in_progress.put(bottle)
         self.bottles_produced += 1
+        factory_logger.process(f"Added bottle {bottle['id']} to production line")
 
     def _update_sensors(self):
         """Update all sensor readings"""
@@ -120,8 +143,37 @@ class BottlingFactory:
 
     async def _process_stations(self):
         """Process bottles at each station"""
-        # Implementation of station processing logic
-        pass
+        if not self.bottles_in_progress.empty():
+            bottle_dict = self.bottles_in_progress.get()
+
+            # Convert dictionary to Bottle dataclass
+            bottle = Bottle(
+                id=bottle_dict["id"],
+                position=bottle_dict["position"],
+                state=BottleState(bottle_dict["state"]),
+            )
+
+            # Process the bottle
+            success = await self.process.process_bottle(bottle)
+
+            # Update metrics
+            if bottle.state == BottleState.COMPLETED:
+                self.metrics["successful_bottles"] += 1
+            elif bottle.state == BottleState.ERROR:
+                self.metrics["failed_bottles"] += 1
+                factory_logger.process(
+                    f"Bottle {bottle.id} failed: {bottle.error}", "error"
+                )
+
+            # Convert back to dictionary and put back in queue if not completed
+            if bottle.state not in [BottleState.COMPLETED, BottleState.ERROR]:
+                bottle_dict = {
+                    "id": bottle.id,
+                    "position": bottle.position,
+                    "state": bottle.state.value,
+                    "error": getattr(bottle, "error", None),
+                }
+                self.bottles_in_progress.put(bottle_dict)
 
     def get_status(self) -> Dict[str, Any]:
         """Get current factory status"""

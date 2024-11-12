@@ -1,32 +1,52 @@
 import asyncio
 import uvicorn
-import signal
-from network.api_server import dashboard_api
+from config import Config
+from simulation.factory import BottlingFactory
+from network.api_server import DashboardAPI
+from scada.system import SCADASystem
+from scada.hmi import HMIServer
 from utils.logging import factory_logger
 
-async def start_api_server():
-    config = uvicorn.Config(
-        app=dashboard_api.app,
-        host="127.0.0.1",
-        port=8000,
-        log_level="info",
-        reload=False  # Set to False for more stable WebSocket connections
-    )
+
+async def start_uvicorn(app):
+    config = uvicorn.Config(app, host="localhost", port=8000, loop="asyncio")
     server = uvicorn.Server(config)
     await server.serve()
 
+
 async def main():
-    # Start API server
-    api_task = asyncio.create_task(start_api_server())
-    
-    # Start your SCADA system
-    factory_logger.system("Starting SCADA system")
-    
+    # Initialize configuration
+    config = Config()
+
+    # Initialize components
+    factory = BottlingFactory(config)
+    scada = SCADASystem(config)
+
+    # Initialize API and HMI servers
+    api_server = DashboardAPI()
+    api_server.set_factory(factory)
+
+    hmi = HMIServer(scada, factory)
+
+    # Configure HMI server
+    hmi_config = uvicorn.Config(hmi.app, host="localhost", port=8001, loop="asyncio")
+    hmi_server = uvicorn.Server(hmi_config)
+
+    # Start all components
+    tasks = [
+        factory.start(),
+        scada.start(),
+        start_uvicorn(api_server.app),
+        hmi_server.serve(),
+    ]
+
     try:
-        await api_task
-    except asyncio.CancelledError:
-        factory_logger.system("Shutting down gracefully")
+        await asyncio.gather(*tasks)
+    except Exception as e:
+        factory_logger.system(f"Application error: {str(e)}", "error")
+    finally:
+        await factory.stop()
+
 
 if __name__ == "__main__":
-    factory_logger.system("Application starting")
     asyncio.run(main())
