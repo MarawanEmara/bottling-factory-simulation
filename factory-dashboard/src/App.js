@@ -51,6 +51,10 @@ function App() {
             cappingState: data.process?.stations?.capping?.actuator_state ? 1 : 0,
             labelingSpeed: data.process?.stations?.labeling?.motor_speed || 0,
             conveyorSpeed: data.process?.conveyor_speed || 0,
+            // Station utilization
+            fillingUtilization: data.stats?.station_utilization?.filling || 0,
+            cappingUtilization: data.stats?.station_utilization?.capping || 0,
+            labelingUtilization: data.stats?.station_utilization?.labeling || 0,
           }].slice(-50));
           
           setBottleStates(data.bottleStates || {});

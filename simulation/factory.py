@@ -49,8 +49,20 @@ class BottlingFactory:
         self.device_handler = DeviceHandler(self.scada, self.modbus, self.opcua)
         self.process = BottlingProcess(self, config, self.device_handler)
 
-        # Initialize metrics tracking
-        self.metrics = {"failed_bottles": 0, "successful_bottles": 0}
+        # Enhanced metrics tracking
+        self.metrics = {
+            "failed_bottles": 0,
+            "successful_bottles": 0,
+            "average_fill_level": 0,
+            "average_labeling_speed": 0,
+            "average_conveyor_speed": 0,
+            "station_utilization": {
+                "filling": 0,
+                "capping": 0,
+                "labeling": 0
+            },
+            "total_operation_time": 0
+        }
 
     def _init_sensors(self) -> Dict[str, Sensor]:
         """Initialize all sensors in the factory"""
@@ -181,10 +193,21 @@ class BottlingFactory:
             "running": self.running,
             "bottles_produced": self.bottles_produced,
             "bottles_in_progress": self.bottles_in_progress.qsize(),
-            "sensor_readings": {
-                sid: sensor.last_reading for sid, sensor in self.sensors.items()
+            "stations": {
+                "filling": {
+                    "busy": self.process.station_locks["filling"].locked(),
+                    "level": self.sensors["level_filling"].last_reading.get("level", 0) if self.sensors["level_filling"].last_reading else 0,
+                    "valve_state": self.actuators["filling_valve"].state
+                },
+                "capping": {
+                    "busy": self.process.station_locks["capping"].locked(),
+                    "actuator_state": self.actuators["capping_actuator"].state
+                },
+                "labeling": {
+                    "busy": self.process.station_locks["labeling"].locked(),
+                    "motor_speed": self.actuators["labeling_motor"].current_speed
+                }
             },
-            "actuator_states": {
-                aid: actuator.get_state() for aid, actuator in self.actuators.items()
-            },
+            "conveyor_speed": self.actuators["main_conveyor"].current_speed,
+            "metrics": self.metrics
         }

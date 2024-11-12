@@ -52,29 +52,37 @@ class DashboardAPI:
                         state = bottle["state"]
                         bottle_states[state] = bottle_states.get(state, 0) + 1
 
-                    # Get recent logs
-                    recent_logs = (
-                        factory_logger.get_recent_logs()
-                    )  # You'll need to implement this
-
                     # Send data to client
-                    await websocket.send_json(
-                        {
-                            "process": status,
-                            "bottleStates": bottle_states,
-                            "logs": recent_logs,
-                            "stats": {
-                                "throughput": self.factory.metrics["successful_bottles"]
-                                / ((time.time() - self.factory.start_time) / 60),
-                                "error_rate": self.factory.metrics["failed_bottles"]
-                                / (
-                                    self.factory.metrics["successful_bottles"]
-                                    + self.factory.metrics["failed_bottles"]
-                                    or 1
-                                ),
+                    await websocket.send_json({
+                        "process": {
+                            **status,
+                            "stations": {
+                                "filling": {
+                                    "busy": status["stations"]["filling"]["busy"],
+                                    "level": status["stations"]["filling"]["level"],
+                                    "valve_state": status["stations"]["filling"]["valve_state"]
+                                },
+                                "capping": {
+                                    "busy": status["stations"]["capping"]["busy"],
+                                    "actuator_state": status["stations"]["capping"]["actuator_state"]
+                                },
+                                "labeling": {
+                                    "busy": status["stations"]["labeling"]["busy"],
+                                    "motor_speed": status["stations"]["labeling"]["motor_speed"]
+                                }
                             },
+                            "conveyor_speed": status["conveyor_speed"]
+                        },
+                        "bottleStates": bottle_states,
+                        "stats": {
+                            "throughput": self.factory.metrics["successful_bottles"] / ((time.time() - self.factory.start_time) / 60),
+                            "error_rate": self.factory.metrics["failed_bottles"] / (self.factory.metrics["successful_bottles"] + self.factory.metrics["failed_bottles"] or 1),
+                            "average_fill_level": self.factory.metrics["average_fill_level"],
+                            "average_labeling_speed": self.factory.metrics["average_labeling_speed"],
+                            "average_conveyor_speed": self.factory.metrics["average_conveyor_speed"],
+                            "station_utilization": self.factory.metrics["station_utilization"]
                         }
-                    )
+                    })
 
                     await asyncio.sleep(1)  # Update every second
 
