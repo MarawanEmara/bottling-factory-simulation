@@ -3,11 +3,11 @@
 from typing import Dict, Any, List
 import asyncio
 from datetime import datetime
-import logging
-from network.protocols import ModbusManager, MQTTManager, OPCUAManager
 from utils.logging import factory_logger
+from network.monitor import protocol_monitor
 import uuid
 from config import Config
+import time
 
 
 class SCADASystem:
@@ -159,25 +159,74 @@ class SCADASystem:
         except Exception as e:
             factory_logger.system(f"Error creating alarm: {str(e)}", "error")
 
-    async def _handle_sensor_data(self, data: Dict[str, Any]):
+    async def _handle_sensor_data(self, data: Any):
         """Handle incoming sensor data"""
         try:
-            sensor_id = data.get("sensor_id")
+            # If data is already a dict, use it directly
+            if isinstance(data, dict):
+                sensor_data = data
+            else:
+                # Try to parse string data
+                try:
+                    import json
+
+                    sensor_data = json.loads(data) if isinstance(data, str) else {}
+                except json.JSONDecodeError:
+                    factory_logger.system(
+                        f"Invalid JSON in sensor data: {data}", "error"
+                    )
+                    return
+
+            sensor_id = sensor_data.get("sensor_id")
             if sensor_id:
-                self.device_states[sensor_id] = data
-                await self._process_sensor_data(data)
-                await self._store_historical_data("sensor", data)
+                # Store clean data
+                self.device_states[sensor_id] = {
+                    "sensor_id": sensor_id,
+                    "value": sensor_data.get("value"),
+                    "timestamp": sensor_data.get("timestamp", time.time()),
+                }
+
+                await self._process_sensor_data(self.device_states[sensor_id])
+                await self._store_historical_data(
+                    "sensor", self.device_states[sensor_id]
+                )
         except Exception as e:
             factory_logger.system(f"Error handling sensor data: {str(e)}", "error")
 
-    async def _handle_actuator_data(self, data: Dict[str, Any]):
+    async def _handle_actuator_data(self, data: Any):
         """Handle incoming actuator data"""
         try:
-            actuator_id = data.get("actuator_id")
+            # If data is already a dict, use it directly
+            if isinstance(data, dict):
+                actuator_data = data
+            else:
+                # Try to parse string data
+                try:
+                    import json
+
+                    actuator_data = json.loads(data) if isinstance(data, str) else {}
+                except json.JSONDecodeError:
+                    factory_logger.system(
+                        f"Invalid JSON in actuator data: {data}", "error"
+                    )
+                    return
+
+            actuator_id = actuator_data.get("actuator_id")
             if actuator_id:
-                self.device_states[actuator_id] = data
-                await self._process_actuator_data(data)
-                await self._store_historical_data("actuator", data)
+                # Store clean data
+                self.device_states[actuator_id] = {
+                    "actuator_id": actuator_id,
+                    "state": actuator_data.get("state"),
+                    "timestamp": actuator_data.get("timestamp", time.time()),
+                }
+
+                if "speed" in actuator_data:
+                    self.device_states[actuator_id]["speed"] = actuator_data["speed"]
+
+                await self._process_actuator_data(self.device_states[actuator_id])
+                await self._store_historical_data(
+                    "actuator", self.device_states[actuator_id]
+                )
         except Exception as e:
             factory_logger.system(f"Error handling actuator data: {str(e)}", "error")
 
@@ -272,3 +321,19 @@ class SCADASystem:
 
         except Exception as e:
             factory_logger.system(f"Error processing actuator data: {str(e)}", "error")
+
+    async def _handle_mqtt_message(self, topic: str, payload: Any):
+        """Handle incoming MQTT messages"""
+        try:
+            if topic.startswith("factory/sensors/"):
+                await self._handle_sensor_data(payload)
+            elif topic.startswith("factory/actuators/"):
+                await self._handle_actuator_data(payload)
+        except Exception as e:
+            factory_logger.system(f"Error handling MQTT message: {str(e)}", "error")
+
+    async def subscribe_to_topics(self):
+        """Subscribe to MQTT topics"""
+        if self.mqtt:
+            await self.mqtt.subscribe("factory/sensors/#", self._handle_mqtt_message)
+            await self.mqtt.subscribe("factory/actuators/#", self._handle_mqtt_message)

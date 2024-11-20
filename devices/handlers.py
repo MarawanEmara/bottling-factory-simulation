@@ -1,15 +1,25 @@
 from typing import Dict, Any
 from devices.plc import FillingPLC, CappingPLC, LabelingPLC, ConveyorPLC
+from devices.sensors import ProximitySensor, LevelSensor
 from network.protocols import ModbusManager, OPCUAManager
 from scada.system import SCADASystem
 from utils.logging import factory_logger
+import time
 
 
 class DeviceHandler:
-    def __init__(self, scada: SCADASystem, modbus: ModbusManager, opcua: OPCUAManager, config=None):
+    def __init__(
+        self,
+        scada: SCADASystem,
+        modbus: ModbusManager,
+        opcua: OPCUAManager,
+        factory=None,
+        config=None,
+    ):
         self.scada = scada
         self.modbus = modbus
         self.opcua = opcua
+        self.factory = factory
         self.plcs = {}
         self._initialized = False
         self.config = config
@@ -24,24 +34,16 @@ class DeviceHandler:
             # Pass simulation config to PLCs
             self.plcs = {
                 "filling": FillingPLC(
-                    modbus=self.modbus,
-                    opcua=self.opcua,
-                    config=self.config
+                    modbus=self.modbus, opcua=self.opcua, config=self.config
                 ),
                 "capping": CappingPLC(
-                    modbus=self.modbus,
-                    opcua=self.opcua,
-                    config=self.config
+                    modbus=self.modbus, opcua=self.opcua, config=self.config
                 ),
                 "labeling": LabelingPLC(
-                    modbus=self.modbus,
-                    opcua=self.opcua,
-                    config=self.config
+                    modbus=self.modbus, opcua=self.opcua, config=self.config
                 ),
                 "conveyor": ConveyorPLC(
-                    modbus=self.modbus,
-                    opcua=self.opcua,
-                    config=self.config
+                    modbus=self.modbus, opcua=self.opcua, config=self.config
                 ),
             }
 
@@ -52,46 +54,37 @@ class DeviceHandler:
             self._initialized = True
             factory_logger.system("Device handler initialized successfully")
         except Exception as e:
-            factory_logger.system(f"Error initializing device handler: {str(e)}", "error")
+            factory_logger.system(
+                f"Error initializing device handler: {str(e)}", "error"
+            )
             raise
 
     async def handle_sensor_data(self, sensor_id: str, value: Any):
         """Handle incoming sensor data"""
-        # Convert dictionary to boolean for proximity sensors
-        if isinstance(value, dict):
-            value = value.get("value", False)
-
-        # Handle PLC communication
-        plc_name = self._get_plc_for_sensor(sensor_id)
-        if plc_name:
-            await self.plcs[plc_name].handle_sensor_data(sensor_id, value)
-
         try:
-            # Update existing variable or create if doesn't exist
-            try:
-                # Try to update existing variable first
-                await self.opcua.update_variable(sensor_id, value)
-            except Exception as e:
-                if "not found" in str(e).lower():
-                    # Variable doesn't exist, create it
-                    if sensor_id.startswith("proximity_"):
-                        await self.opcua.create_variable(
-                            sensor_id, bool(value), "Boolean"
-                        )
-                    elif sensor_id.startswith("level_"):
-                        await self.opcua.create_variable(
-                            sensor_id, float(value), "Double"
-                        )
-                else:
-                    raise  # Re-raise if it's a different error
+            # Convert dictionary to boolean for proximity sensors
+            if isinstance(value, dict):
+                value = value.get("value", False)
 
-        except Exception as e:
-            factory_logger.network(
-                f"Error handling OPC UA variable {sensor_id}: {str(e)}", "error"
+            # Handle PLC communication based on sensor type
+            plc_name = self._get_plc_for_sensor(sensor_id)
+            if plc_name:
+                factory_logger.system(
+                    f"Routing sensor {sensor_id} data to {plc_name} PLC"
+                )
+                plc = self.plcs.get(plc_name)
+                if plc:
+                    await plc.handle_sensor_data(sensor_id, value)
+                else:
+                    factory_logger.system(f"PLC {plc_name} not found", "error")
+
+            # Update SCADA
+            await self.scada._handle_sensor_data(
+                {"sensor_id": sensor_id, "value": value, "timestamp": time.time()}
             )
 
-        # Update SCADA with the raw value
-        await self.scada._handle_sensor_data({"sensor_id": sensor_id, "value": value})
+        except Exception as e:
+            factory_logger.system(f"Error handling sensor data: {str(e)}", "error")
 
     async def handle_actuator_command(self, actuator_id: str, command: str):
         """Handle actuator commands"""
@@ -103,6 +96,7 @@ class DeviceHandler:
         )
 
     def _get_plc_for_sensor(self, sensor_id: str) -> str:
+        """Map sensors to their controlling PLCs"""
         if "filling" in sensor_id:
             return "filling"
         elif "capping" in sensor_id:

@@ -5,3 +5,4 @@ __pycache__/
 *.py[cod]
 /logs
 /captures
+plan/README.md

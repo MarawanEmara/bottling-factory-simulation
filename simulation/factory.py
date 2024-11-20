@@ -1,7 +1,7 @@
 # simulation/factory.py
 
 import time
-from typing import Dict, List, Any
+from typing import Dict, Any
 from queue import Queue
 from asyncio import Event
 import asyncio
@@ -16,7 +16,6 @@ from devices.actuators import (
     Actuator,
 )
 from devices.handlers import DeviceHandler
-from network.protocols import ModbusManager, OPCUAManager
 from scada.system import SCADASystem
 from simulation.process import BottlingProcess, Bottle, BottleState
 from utils.logging import factory_logger
@@ -37,12 +36,13 @@ class BottlingFactory:
         self.sensors = self._init_sensors()
         self.actuators = self._init_actuators()
 
-        # Initialize device handler with existing SCADA instance
+        # Initialize device handler with existing SCADA instance and factory reference
         self.device_handler = DeviceHandler(
             scada=self.scada,
             modbus=self.modbus,
             opcua=self.opcua,
-            config=self.simulation_config,
+            factory=self,
+            config=config.simulation,
         )
 
         # Initialize process
@@ -60,16 +60,22 @@ class BottlingFactory:
         """Initialize all sensors in the factory"""
         sensors = {}
 
-        # Add proximity sensors
+        # Add proximity sensors for all positions in layout
         for pos_name, position in self.layout.SENSOR_POSITIONS.items():
             sensor_id = f"proximity_{pos_name}"
             sensors[sensor_id] = ProximitySensor(sensor_id, position)
+            factory_logger.system(
+                f"Created proximity sensor {sensor_id} at position {position}"
+            )
 
         # Add level sensor at filling station
         level_sensor = LevelSensor(
             "level_filling", self.layout.STATION_POSITIONS["filling"]
         )
         sensors["level_filling"] = level_sensor
+        factory_logger.system(
+            f"Created level sensor at filling station position {self.layout.STATION_POSITIONS['filling']}"
+        )
 
         return sensors
 
@@ -127,11 +133,24 @@ class BottlingFactory:
             actuator.deactivate()
 
     async def _run_simulation(self):
-        """Main simulation loop with protocol monitoring"""
+        """Main simulation loop"""
         last_bottle_time = time.time()
+        conveyor_speed = 1.0  # units per second
 
         while not self.stop_event.is_set():
             current_time = time.time()
+
+            # Move bottles along conveyor
+            if self.actuators["main_conveyor"].state:
+                for bottle in self.process.bottles.values():
+                    if bottle.state not in [BottleState.ERROR, BottleState.COMPLETED]:
+                        # Update bottle position based on conveyor speed
+                        movement = conveyor_speed * 0.1  # 0.1s update interval
+                        bottle.position += movement
+
+            # Update sensors and actuators
+            await self._update_sensors()
+            await self._update_actuators()
 
             # Add new bottle if it's time
             if (
@@ -170,10 +189,81 @@ class BottlingFactory:
         self.bottles_produced += 1
         factory_logger.process(f"Added bottle {bottle['id']} to production line")
 
-    def _update_sensors(self):
-        """Update all sensor readings"""
-        for sensor in self.sensors.values():
-            sensor.update()
+    async def _update_sensors(self):
+        """Update all sensor readings and publish through protocols"""
+        try:
+            for sensor in self.sensors.values():
+                # Update proximity sensors based on bottle positions
+                if isinstance(sensor, ProximitySensor):
+                    # Reset detection
+                    sensor.detected = False
+
+                    # Check all bottles in progress
+                    bottles_list = list(self.bottles_in_progress.queue)
+                    for bottle_data in bottles_list:
+                        bottle_position = bottle_data.get("position", 0)
+                        # Detect bottle within ±2 units of sensor position
+                        if abs(sensor.position - bottle_position) <= 2:
+                            sensor.detected = True
+                            factory_logger.system(
+                                f"Proximity sensor {sensor.sensor_id} detected bottle at position {bottle_position}"
+                            )
+                            break
+
+                # Update level sensor during filling
+                elif (
+                    isinstance(sensor, LevelSensor)
+                    and sensor.sensor_id == "level_filling"
+                ):
+                    bottles_list = list(self.bottles_in_progress.queue)
+                    for bottle_data in bottles_list:
+                        if bottle_data.get("state") == BottleState.FILLING.value:
+                            sensor.current_level = bottle_data.get("fill_level", 0.0)
+                            factory_logger.system(
+                                f"Level sensor updated: {sensor.current_level}%"
+                            )
+                            break
+                        else:
+                            sensor.current_level = 0.0
+
+                # Publish updated readings
+                reading = sensor.update()
+                await sensor.publish_reading(self.modbus, self.protocols["mqtt"])
+
+        except Exception as e:
+            factory_logger.system(f"Error updating sensors: {str(e)}", "error")
+
+    async def _update_actuators(self):
+        """Update all actuator states and publish through protocols"""
+        try:
+            # Update conveyor motor
+            self.actuators["main_conveyor"].set_speed(1.0 if self.running else 0.0)
+
+            # Update filling valve based on filling operation
+            bottles_list = list(self.bottles_in_progress.queue)
+            filling_in_progress = any(
+                b.get("state") == BottleState.FILLING.value for b in bottles_list
+            )
+            if filling_in_progress:
+                self.actuators["filling_valve"].activate()
+            else:
+                self.actuators["filling_valve"].deactivate()
+
+            # Update labeling motor based on labeling operation
+            labeling_in_progress = any(
+                b.get("state") == BottleState.LABELING.value for b in bottles_list
+            )
+            if labeling_in_progress:
+                self.actuators["labeling_motor"].set_speed(1.0)
+            else:
+                self.actuators["labeling_motor"].set_speed(0.0)
+
+            # Publish all actuator states
+            for actuator in self.actuators.values():
+                await actuator.publish_state(self.modbus, self.protocols["mqtt"])
+
+        except Exception as e:
+            factory_logger.system(f"Error updating actuators: {str(e)}", "error")
 
     async def _process_stations(self):
         """Process bottles at each station"""

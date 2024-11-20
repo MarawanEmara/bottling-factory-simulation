@@ -8,10 +8,10 @@ class Config:
 class SimulationConfig:
     def __init__(self):
         # Timing settings (in seconds)
-        self.FILL_TIME = 3.0
-        self.CAP_TIME = 2.0
-        self.LABEL_TIME = 2.5
-        self.BOTTLE_INTERVAL = 2.0
+        self.FILL_TIME = 1.0
+        self.CAP_TIME = 1.0
+        self.LABEL_TIME = 1.0
+        self.BOTTLE_INTERVAL = 5.0
         self.SIMULATION_SPEED = 1.0
 
         # Network settings

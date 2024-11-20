@@ -6,6 +6,7 @@ import asyncio
 from typing import Dict, Any
 import time
 from utils.logging import factory_logger
+from devices.sensors import ProximitySensor
 
 
 class BottleState(Enum):
@@ -91,17 +92,17 @@ class BottlingProcess:
                                 f"Starting fill operation for bottle {bottle.id}"
                             )
 
-                            # 1. Notify Filling PLC about bottle detection
-                            await self.device_handler.handle_sensor_data(
-                                "proximity_filling", True
-                            )
+                            # Move bottle to filling position
+                            bottle.position = self.factory.layout.STATION_POSITIONS[
+                                "filling"
+                            ]
 
-                            # 2. Start filling and monitor level
+                            # Start filling and monitor level
                             bottle.state = BottleState.FILLING
                             start_time = time.time()
-                            fill_level = 0.0
+                            bottle.fill_level = 0.0
 
-                            while fill_level < 95.0:  # Fill until 95%
+                            while bottle.fill_level < 95.0:  # Fill until 95%
                                 if (
                                     time.time() - start_time
                                     > self.config.FILL_TIME * 1.5
@@ -109,18 +110,24 @@ class BottlingProcess:
                                     raise TimeoutError("Fill operation timed out")
 
                                 # Increment fill level
-                                fill_increment = (
-                                    100.0 / self.config.FILL_TIME
-                                ) * 0.1  # 0.1s update
-                                fill_level += fill_increment
+                                fill_increment = (100.0 / self.config.FILL_TIME) * 0.1
+                                bottle.fill_level += fill_increment
 
-                                # Update level sensor
-                                await self.device_handler.handle_sensor_data(
-                                    "level_filling", fill_level
-                                )
+                                # Convert bottle to dictionary for queue
+                                bottle_dict = {
+                                    "id": bottle.id,
+                                    "position": bottle.position,
+                                    "state": bottle.state.value,
+                                    "fill_level": bottle.fill_level,
+                                }
+
+                                # Update bottle in factory's queue
+                                if not self.factory.bottles_in_progress.empty():
+                                    self.factory.bottles_in_progress.get()
+                                self.factory.bottles_in_progress.put(bottle_dict)
 
                                 factory_logger.process(
-                                    f"Bottle {bottle.id} fill level: {fill_level:.1f}%"
+                                    f"Bottle {bottle.id} fill level: {bottle.fill_level:.1f}%"
                                 )
                                 await asyncio.sleep(0.1)
 
@@ -151,6 +158,11 @@ class BottlingProcess:
                                 f"Starting capping operation for bottle {bottle.id}"
                             )
 
+                            # Move bottle to capping position
+                            bottle.position = self.factory.layout.STATION_POSITIONS[
+                                "capping"
+                            ]
+
                             # 1. Notify Capping PLC about bottle detection
                             await self.device_handler.handle_sensor_data(
                                 "proximity_capping", True
@@ -162,7 +174,21 @@ class BottlingProcess:
 
                             # 3. Simulate capping operation
                             cap_time = self.config.CAP_TIME
-                            await asyncio.sleep(cap_time)
+                            for _ in range(
+                                int(cap_time * 10)
+                            ):  # Update 10 times per second
+                                # Update bottle in factory's queue
+                                bottle_dict = {
+                                    "id": bottle.id,
+                                    "position": bottle.position,
+                                    "state": bottle.state.value,
+                                }
+
+                                if not self.factory.bottles_in_progress.empty():
+                                    self.factory.bottles_in_progress.get()
+                                self.factory.bottles_in_progress.put(bottle_dict)
+
+                                await asyncio.sleep(0.1)
 
                             if time.time() - start_time > cap_time * 1.5:
                                 raise TimeoutError("Capping operation timed out")

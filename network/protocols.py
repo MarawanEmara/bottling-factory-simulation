@@ -246,9 +246,7 @@ class ModbusManager:
                 result = await self.client.write_register(address, value, slave=1)
                 return not result.isError() if hasattr(result, "isError") else False
             else:
-                factory_logger.network(
-                    f"Invalid register address: {address}", "error"
-                )
+                factory_logger.network(f"Invalid register address: {address}", "error")
                 return False
         except Exception as e:
             factory_logger.network(
@@ -265,9 +263,13 @@ class MQTTManager:
         self.client = mqtt.Client()
         self.capture = PacketCapture("mqtt_traffic.pcap")
         self.callbacks = {}
+        self.loop = None
 
     async def start(self):
         try:
+            # Store the event loop
+            self.loop = asyncio.get_running_loop()
+
             # Set up message callback
             self.client.on_message = self._on_message
 
@@ -328,21 +330,24 @@ class MQTTManager:
     def _on_message(self, client, userdata, message):
         """Handle incoming MQTT messages"""
         topic = message.topic
-        payload = message.payload.decode()
+        try:
+            # Extract value from dictionary if needed
+            if isinstance(message.payload, dict):
+                payload = message.payload.get("value", message.payload)
+            else:
+                payload = message.payload
 
-        # Find matching callback
-        for sub_topic, callback in self.callbacks.items():
-            if mqtt.topic_matches_sub(sub_topic, topic):
-                # Convert payload to dict if possible
-                try:
-                    import json
+            # Find matching callback
+            for sub_topic, callback in self.callbacks.items():
+                if mqtt.topic_matches_sub(sub_topic, topic):
+                    try:
+                        if self.loop and self.loop.is_running():
+                            self.loop.create_task(callback(payload))
+                    except Exception as e:
+                        factory_logger.network(f"Callback error: {str(e)}", "error")
 
-                    payload = json.loads(payload)
-                except:
-                    pass
-
-                # Create asyncio task for callback
-                asyncio.create_task(callback(payload))
+        except Exception as e:
+            factory_logger.network(f"MQTT message processing error: {str(e)}", "error")
 
 
 class OPCUAManager:

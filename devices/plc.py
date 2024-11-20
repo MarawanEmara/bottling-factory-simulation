@@ -134,7 +134,6 @@ class FillingPLC(BasePLC):
                 # Start filling operation
                 await self.update_operation("start_fill")
                 await self.modbus.update_register(self.valve_register, 1)
-                self.current_level = 0.0
                 factory_logger.system("Starting fill operation")
 
             elif sensor_id == "level_filling":
@@ -163,23 +162,23 @@ class CappingPLC(BasePLC):
     async def handle_sensor_data(self, sensor_id: str, value: Any):
         """Handle incoming sensor data"""
         await super().handle_sensor_data(sensor_id, value)
-        
+
         try:
             if sensor_id == "proximity_capping" and value:
                 # Start capping operation
                 await self.update_operation("start_cap")
                 await self.modbus.update_register(self.actuator_register, 1)
                 factory_logger.system("Starting cap operation")
-                
+
                 # Simulate capping time using config
                 cap_time = self.config.CAP_TIME if self.config else 2.0
                 await asyncio.sleep(cap_time)
-                
+
                 # Complete capping
                 await self.update_operation("cap_complete")
                 await self.modbus.update_register(self.actuator_register, 0)
                 factory_logger.system("Cap operation complete")
-                
+
         except Exception as e:
             factory_logger.system(f"Error in capping PLC: {str(e)}", "error")
 
@@ -193,22 +192,22 @@ class LabelingPLC(BasePLC):
     async def handle_sensor_data(self, sensor_id: str, value: Any):
         """Handle incoming sensor data"""
         await super().handle_sensor_data(sensor_id, value)
-        
+
         try:
             if sensor_id == "proximity_labeling" and value:
                 # Start labeling operation
                 await self.update_operation("start_label")
                 await self.modbus.update_register(self.motor_register, 1)
                 factory_logger.system("Starting label operation")
-                
+
                 # Simulate labeling time
                 await asyncio.sleep(self.config.LABEL_TIME)
-                
+
                 # Complete labeling
                 await self.update_operation("label_complete")
                 await self.modbus.update_register(self.motor_register, 0)
                 factory_logger.system("Label operation complete")
-                
+
         except Exception as e:
             factory_logger.system(f"Error in labeling PLC: {str(e)}", "error")
 
