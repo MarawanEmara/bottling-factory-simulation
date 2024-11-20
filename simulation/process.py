@@ -37,7 +37,7 @@ class Bottle:
 class BottlingProcess:
     def __init__(self, factory, config, device_handler):
         self.factory = factory
-        self.config = config
+        self.config = config.simulation
         self.device_handler = device_handler
         self.bottles = {}
         self.station_locks = {
@@ -55,14 +55,16 @@ class BottlingProcess:
                 "capping": asyncio.Lock(),
                 "labeling": asyncio.Lock(),
             }
-            
+
             # Clear any existing bottles
             self.bottles = {}
-            
+
             factory_logger.process("Bottling process initialized")
-            
+
         except Exception as e:
-            factory_logger.process(f"Error initializing bottling process: {str(e)}", "error")
+            factory_logger.process(
+                f"Error initializing bottling process: {str(e)}", "error"
+            )
             raise
 
     async def process_bottle(self, bottle: Bottle):
@@ -76,90 +78,179 @@ class BottlingProcess:
             if bottle.state == BottleState.ERROR:
                 return False
 
-            # If bottle is new, start with filling
-            if bottle.state == BottleState.NEW:
-                bottle.state = BottleState.WAITING_FILL
-                factory_logger.process(f"Bottle {bottle.id} waiting for filling")
-                return True
+            # Handle state transitions and PLC communication
+            match bottle.state:
+                case BottleState.NEW:
+                    bottle.state = BottleState.WAITING_FILL
+                    return True
 
-            # Handle filling station
-            if bottle.state == BottleState.WAITING_FILL:
-                async with self.station_locks["filling"]:
+                case BottleState.WAITING_FILL:
+                    async with self.station_locks["filling"]:
+                        try:
+                            factory_logger.process(
+                                f"Starting fill operation for bottle {bottle.id}"
+                            )
+
+                            # 1. Notify Filling PLC about bottle detection
+                            await self.device_handler.handle_sensor_data(
+                                "proximity_filling", True
+                            )
+
+                            # 2. Start filling and monitor level
+                            bottle.state = BottleState.FILLING
+                            start_time = time.time()
+                            fill_level = 0.0
+
+                            while fill_level < 95.0:  # Fill until 95%
+                                if (
+                                    time.time() - start_time
+                                    > self.config.FILL_TIME * 1.5
+                                ):
+                                    raise TimeoutError("Fill operation timed out")
+
+                                # Increment fill level
+                                fill_increment = (
+                                    100.0 / self.config.FILL_TIME
+                                ) * 0.1  # 0.1s update
+                                fill_level += fill_increment
+
+                                # Update level sensor
+                                await self.device_handler.handle_sensor_data(
+                                    "level_filling", fill_level
+                                )
+
+                                factory_logger.process(
+                                    f"Bottle {bottle.id} fill level: {fill_level:.1f}%"
+                                )
+                                await asyncio.sleep(0.1)
+
+                            # 3. Complete filling
+                            bottle.state = BottleState.FILLED
+                            factory_logger.process(
+                                f"Fill operation completed for bottle {bottle.id}"
+                            )
+                            return True
+
+                        except Exception as e:
+                            factory_logger.process(
+                                f"Filling error for bottle {bottle.id}: {str(e)}",
+                                "error",
+                            )
+                            bottle.state = BottleState.ERROR
+                            bottle.error = str(e)
+                            return False
+
+                case BottleState.FILLED:
+                    bottle.state = BottleState.WAITING_CAP
+                    return True
+
+                case BottleState.WAITING_CAP:
+                    async with self.station_locks["capping"]:
+                        try:
+                            factory_logger.process(
+                                f"Starting capping operation for bottle {bottle.id}"
+                            )
+
+                            # 1. Notify Capping PLC about bottle detection
+                            await self.device_handler.handle_sensor_data(
+                                "proximity_capping", True
+                            )
+
+                            # 2. Start capping operation
+                            bottle.state = BottleState.CAPPING
+                            start_time = time.time()
+
+                            # 3. Simulate capping operation
+                            cap_time = self.config.CAP_TIME
+                            await asyncio.sleep(cap_time)
+
+                            if time.time() - start_time > cap_time * 1.5:
+                                raise TimeoutError("Capping operation timed out")
+
+                            # 4. Complete capping
+                            bottle.has_cap = True
+                            bottle.state = BottleState.CAPPED
+                            factory_logger.process(
+                                f"Capping completed for bottle {bottle.id}"
+                            )
+                            return True
+
+                        except Exception as e:
+                            factory_logger.process(
+                                f"Capping error for bottle {bottle.id}: {str(e)}",
+                                "error",
+                            )
+                            bottle.state = BottleState.ERROR
+                            bottle.error = str(e)
+                            return False
+
+                case BottleState.CAPPED:
+                    bottle.state = BottleState.WAITING_LABEL
+                    return True
+
+                case BottleState.WAITING_LABEL:
+                    async with self.station_locks["labeling"]:
+                        try:
+                            factory_logger.process(
+                                f"Starting labeling operation for bottle {bottle.id}"
+                            )
+
+                            # 1. Notify Labeling PLC about bottle detection
+                            await self.device_handler.handle_sensor_data(
+                                "proximity_labeling", True
+                            )
+
+                            # 2. Start labeling operation
+                            bottle.state = BottleState.LABELING
+                            start_time = time.time()
+
+                            # 3. Simulate labeling operation
+                            await asyncio.sleep(self.config.LABEL_TIME)
+
+                            if time.time() - start_time > self.config.LABEL_TIME * 1.5:
+                                raise TimeoutError("Labeling operation timed out")
+
+                            # 4. Complete labeling
+                            bottle.has_label = True
+                            bottle.state = BottleState.COMPLETED
+                            factory_logger.process(
+                                f"Labeling completed for bottle {bottle.id}"
+                            )
+                            return True
+
+                        except Exception as e:
+                            factory_logger.process(
+                                f"Labeling error for bottle {bottle.id}: {str(e)}",
+                                "error",
+                            )
+                            bottle.state = BottleState.ERROR
+                            bottle.error = str(e)
+                            return False
+
+                case BottleState.COMPLETED:
                     try:
-                        bottle.state = BottleState.FILLING
+                        # Update metrics
+                        self.factory.metrics["successful_bottles"] += 1
+
+                        # Calculate production time
+                        production_time = time.time() - bottle.entry_time
                         factory_logger.process(
-                            f"Starting fill operation for bottle {bottle.id}"
+                            f"Bottle {bottle.id} completed successfully in {production_time:.1f} seconds"
                         )
 
-                        # Simulate filling process
-                        await asyncio.sleep(self.config.simulation.FILL_TIME)
-                        bottle.fill_level = 100
-                        bottle.state = BottleState.FILLED
-                        factory_logger.process(
-                            f"Bottle {bottle.id} filled successfully"
+                        # Notify exit sensor
+                        await self.device_handler.handle_sensor_data(
+                            "proximity_exit", True
                         )
-                        return True
+
+                        # Remove bottle from production line
+                        return (
+                            False  # Returning False removes the bottle from the queue
+                        )
+
                     except Exception as e:
                         factory_logger.process(
-                            f"Filling error for bottle {bottle.id}: {str(e)}", "error"
-                        )
-                        bottle.state = BottleState.ERROR
-                        bottle.error = str(e)
-                        return False
-
-            # Handle capping station
-            if bottle.state == BottleState.FILLED:
-                bottle.state = BottleState.WAITING_CAP
-                return True
-
-            if bottle.state == BottleState.WAITING_CAP:
-                async with self.station_locks["capping"]:
-                    try:
-                        bottle.state = BottleState.CAPPING
-                        factory_logger.process(
-                            f"Starting cap operation for bottle {bottle.id}"
-                        )
-
-                        # Simulate capping process
-                        await asyncio.sleep(self.config.simulation.CAP_TIME)
-                        bottle.has_cap = True
-                        bottle.state = BottleState.CAPPED
-                        factory_logger.process(
-                            f"Bottle {bottle.id} capped successfully"
-                        )
-                        return True
-                    except Exception as e:
-                        factory_logger.process(
-                            f"Capping error for bottle {bottle.id}: {str(e)}", "error"
-                        )
-                        bottle.state = BottleState.ERROR
-                        bottle.error = str(e)
-                        return False
-
-            # Handle labeling station
-            if bottle.state == BottleState.CAPPED:
-                bottle.state = BottleState.WAITING_LABEL
-                return True
-
-            if bottle.state == BottleState.WAITING_LABEL:
-                async with self.station_locks["labeling"]:
-                    try:
-                        bottle.state = BottleState.LABELING
-                        factory_logger.process(
-                            f"Starting label operation for bottle {bottle.id}"
-                        )
-
-                        # Simulate labeling process
-                        await asyncio.sleep(self.config.simulation.LABEL_TIME)
-                        bottle.has_label = True
-                        bottle.state = BottleState.COMPLETED
-                        factory_logger.process(
-                            f"Bottle {bottle.id} labeled successfully"
-                        )
-                        return True
-                    except Exception as e:
-                        factory_logger.process(
-                            f"Labeling error for bottle {bottle.id}: {str(e)}", "error"
+                            f"Error finalizing bottle {bottle.id}: {str(e)}", "error"
                         )
                         bottle.state = BottleState.ERROR
                         bottle.error = str(e)
@@ -203,36 +294,42 @@ class BottlingProcess:
                 )
                 bottle.state = BottleState.WAITING_FILL
 
-                # Notify Filling PLC about bottle detection (Modbus TCP)
-                await self.device_handler.handle_sensor_data("proximity_filling", True)
-
-                factory_logger.process("Waiting for PLC to start fill operation...")
-                await self.device_handler.plcs["filling"].wait_for_operation(
-                    "start_fill"
+                # 1. Proximity sensor detects bottle (Modbus TCP)
+                await self.device_handler.handle_sensor_data(
+                    "proximity_filling", True, protocol="modbus"
                 )
-                factory_logger.process("PLC started fill operation")
 
+                # 2. Wait for PLC to signal start (OPC UA)
                 bottle.state = BottleState.FILLING
-                start_time = time.time()
+                while True:
+                    operation = await self.device_handler.plcs[
+                        "filling"
+                    ].read_operation()
+                    if operation == "start_fill":
+                        break
+                    await asyncio.sleep(0.1)
 
+                # 3. Monitor fill level
+                start_time = time.time()
                 while bottle.fill_level < 100:
                     if time.time() - start_time > self.config.FILL_TIME * 1.5:
                         raise Exception("Fill timeout")
 
-                    # Update fill level
+                    # Update fill level through Modbus
                     bottle.fill_level += (100 / self.config.FILL_TIME) * 0.1
-
-                    # Update level sensor
                     await self.device_handler.handle_sensor_data(
-                        "level_filling", bottle.fill_level
+                        "level_filling", float(bottle.fill_level), protocol="modbus"
                     )
-
                     await asyncio.sleep(0.1)
 
-                # Wait for PLC to complete fill operation (OPC UA)
-                await self.device_handler.plcs["filling"].wait_for_operation(
-                    "fill_complete"
-                )
+                # 4. Wait for PLC to signal completion (OPC UA)
+                while True:
+                    operation = await self.device_handler.plcs[
+                        "filling"
+                    ].read_operation()
+                    if operation == "fill_complete":
+                        break
+                    await asyncio.sleep(0.1)
 
                 bottle.state = BottleState.FILLED
                 return True
@@ -240,7 +337,9 @@ class BottlingProcess:
             except Exception as e:
                 bottle.state = BottleState.ERROR
                 bottle.error = f"Filling error: {str(e)}"
-                factory_logger.error(f"Error filling bottle {bottle.id}: {str(e)}")
+                factory_logger.process(
+                    f"Error filling bottle {bottle.id}: {str(e)}", "error"
+                )
                 return False
 
     async def _cap_bottle(self, bottle: Bottle) -> bool:

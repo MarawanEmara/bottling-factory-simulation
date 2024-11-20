@@ -25,7 +25,8 @@ from network.monitor import protocol_monitor
 
 class BottlingFactory:
     def __init__(self, config: Config, scada: SCADASystem, protocols: Dict):
-        self.config = config.simulation
+        self.config = config
+        self.simulation_config = config.simulation
         self.layout = config.layout
         self.scada = scada
         self.protocols = protocols
@@ -36,11 +37,12 @@ class BottlingFactory:
         self.sensors = self._init_sensors()
         self.actuators = self._init_actuators()
 
-        # Initialize device handler
+        # Initialize device handler with existing SCADA instance
         self.device_handler = DeviceHandler(
-            self.scada, 
-            self.protocols["modbus"], 
-            self.protocols["opcua"]
+            scada=self.scada,
+            modbus=self.modbus,
+            opcua=self.opcua,
+            config=self.simulation_config,
         )
 
         # Initialize process
@@ -64,9 +66,10 @@ class BottlingFactory:
             sensors[sensor_id] = ProximitySensor(sensor_id, position)
 
         # Add level sensor at filling station
-        sensors["level_filling"] = LevelSensor(
+        level_sensor = LevelSensor(
             "level_filling", self.layout.STATION_POSITIONS["filling"]
         )
+        sensors["level_filling"] = level_sensor
 
         return sensors
 
@@ -84,10 +87,10 @@ class BottlingFactory:
         try:
             # Initialize device handler
             await self.device_handler.initialize()
-            
+
             # Initialize process
             await self.process.initialize()
-            
+
             factory_logger.system("Factory initialization complete")
         except Exception as e:
             factory_logger.system(f"Factory initialization error: {str(e)}", "error")
@@ -103,15 +106,12 @@ class BottlingFactory:
         self.start_time = time.time()
 
         try:
-            # Start the Modbus server first
-            await self.modbus.start()
-
             # Start the conveyor
             self.actuators["main_conveyor"].activate()
 
             # Run simulation in background task
             asyncio.create_task(self._run_simulation())
-            
+
         except Exception as e:
             factory_logger.system(f"Error starting factory: {str(e)}", "error")
             self.running = False
@@ -134,7 +134,10 @@ class BottlingFactory:
             current_time = time.time()
 
             # Add new bottle if it's time
-            if current_time - last_bottle_time >= self.config.BOTTLE_INTERVAL:
+            if (
+                current_time - last_bottle_time
+                >= self.simulation_config.BOTTLE_INTERVAL
+            ):
                 self._add_new_bottle()
                 # Record MQTT event for new bottle
                 protocol_monitor.record_event(
@@ -142,7 +145,7 @@ class BottlingFactory:
                     "factory",
                     "scada",
                     "new_bottle",
-                    {"bottle_id": f"bottle_{self.bottles_produced}"}
+                    {"bottle_id": f"bottle_{self.bottles_produced}"},
                 )
                 last_bottle_time = current_time
 
@@ -154,7 +157,7 @@ class BottlingFactory:
                 self.modbus.capture.save()
                 self.opcua.capture.save()
 
-            await asyncio.sleep(0.1 / self.config.SIMULATION_SPEED)
+            await asyncio.sleep(0.1 / self.simulation_config.SIMULATION_SPEED)
 
     def _add_new_bottle(self):
         """Add a new bottle to the production line"""
@@ -215,18 +218,22 @@ class BottlingFactory:
             "stations": {
                 "filling": {
                     "busy": self.process.station_locks["filling"].locked(),
-                    "level": self.sensors["level_filling"].last_reading.get("level", 0) if self.sensors["level_filling"].last_reading else 0,
-                    "valve_state": self.actuators["filling_valve"].state
+                    "level": (
+                        self.sensors["level_filling"].last_reading.get("level", 0)
+                        if self.sensors["level_filling"].last_reading
+                        else 0
+                    ),
+                    "valve_state": self.actuators["filling_valve"].state,
                 },
                 "capping": {
                     "busy": self.process.station_locks["capping"].locked(),
-                    "actuator_state": self.actuators["capping_actuator"].state
+                    "actuator_state": self.actuators["capping_actuator"].state,
                 },
                 "labeling": {
                     "busy": self.process.station_locks["labeling"].locked(),
-                    "motor_speed": self.actuators["labeling_motor"].current_speed
-                }
+                    "motor_speed": self.actuators["labeling_motor"].current_speed,
+                },
             },
             "conveyor_speed": self.actuators["main_conveyor"].current_speed,
-            "metrics": self.metrics
+            "metrics": self.metrics,
         }

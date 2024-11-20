@@ -18,9 +18,14 @@ class ApplicationManager:
         self.factory = None
         self.api_server = None
         self.hmi = None
+        self._initialized = False
 
     async def initialize(self):
         """Initialize all components in correct order"""
+        if self._initialized:
+            factory_logger.system("Application already initialized")
+            return
+
         try:
             # 1. Initialize protocols first
             factory_logger.system("Initializing protocols...")
@@ -32,26 +37,20 @@ class ApplicationManager:
                 "opcua": OPCUAManager(),
             }
 
-            # 2. Start protocols
-            for name, protocol in self.protocols.items():
-                factory_logger.system(f"Starting {name} protocol...")
-                await protocol.start()
-                factory_logger.system(f"{name} protocol started successfully")
-
-            # 3. Initialize SCADA with config and protocols
+            # 2. Initialize SCADA with config and protocols
             self.scada = SCADASystem(self.config)
-            self.scada.set_protocols(self.protocols)  # Pass existing protocol instances
-            await self.scada.start()
+            self.scada.set_protocols(self.protocols)
 
-            # 4. Initialize Factory
+            # 3. Initialize Factory with existing SCADA instance
             self.factory = BottlingFactory(self.config, self.scada, self.protocols)
             await self.factory.initialize()
 
-            # 5. Initialize API and HMI
+            # 4. Initialize API and HMI
             self.api_server = DashboardAPI()
             self.api_server.set_factory(self.factory)
             self.hmi = HMIServer(self.scada, self.factory)
 
+            self._initialized = True
             factory_logger.system("All components initialized successfully")
 
         except Exception as e:
@@ -62,15 +61,19 @@ class ApplicationManager:
     async def start(self):
         """Start all components"""
         try:
-            # Start factory
-            if self.factory:
-                await self.factory.start()
+            # 1. Start protocols first
+            for name, protocol in self.protocols.items():
+                factory_logger.system(f"Starting {name} protocol...")
+                await protocol.start()
+                factory_logger.system(f"{name} protocol started successfully")
 
-            # Start SCADA
-            if self.scada:
-                await self.scada.start()
+            # 2. Start SCADA
+            await self.scada.start()
 
-            # Start API and HMI servers
+            # 3. Start factory
+            await self.factory.start()
+
+            # 4. Start API and HMI servers
             if self.api_server:
                 await self.api_server.start()
             if self.hmi:

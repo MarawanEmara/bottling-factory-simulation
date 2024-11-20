@@ -3,11 +3,11 @@
 import asyncio
 from typing import Callable, Any
 from utils.logging import factory_logger
-from asyncua import Server as OPCUAServer
+from asyncua import Server as OPCUAServer, ua
 import paho.mqtt.client as mqtt
 from scapy.all import wrpcap, Ether, IP, TCP, Raw
 from pathlib import Path
-from pymodbus import pymodbus_apply_logging_config, ModbusException
+from pymodbus import pymodbus_apply_logging_config
 import pymodbus.client as ModbusClient
 from pymodbus import FramerType
 from pymodbus.datastore import (
@@ -15,7 +15,6 @@ from pymodbus.datastore import (
     ModbusSlaveContext,
     ModbusServerContext,
 )
-from utils.logging import factory_logger
 from pymodbus.server import StartAsyncTcpServer
 
 
@@ -69,15 +68,14 @@ class ModbusManager:
         self.client_task = None
         self.capture = PacketCapture("modbus_traffic.pcap")
 
-        pymodbus_apply_logging_config("DEBUG")
         factory_logger.network(f"Initializing ModbusManager on port {self.port}")
 
-        # Create datastore
+        # Create datastore with larger address space
         self.store = ModbusSlaveContext(
-            di=ModbusSequentialDataBlock(0, [0] * 100),
-            co=ModbusSequentialDataBlock(0, [0] * 100),
-            hr=ModbusSequentialDataBlock(0, [0] * 100),
-            ir=ModbusSequentialDataBlock(0, [0] * 100),
+            di=ModbusSequentialDataBlock(0, [0] * 10000),  # Discrete Inputs
+            co=ModbusSequentialDataBlock(0, [0] * 10000),  # Coils
+            hr=ModbusSequentialDataBlock(0, [0] * 10000),  # Holding Registers
+            ir=ModbusSequentialDataBlock(0, [0] * 10000),  # Input Registers
         )
         self.context = ModbusServerContext(slaves=self.store, single=True)
 
@@ -143,16 +141,25 @@ class ModbusManager:
             self.running = True
 
             # Start server task
+            factory_logger.network("Creating server task")
             self.server_task = asyncio.create_task(self.run_server())
 
-            # Wait for server to initialize
+            # Verify server task is running
             await asyncio.sleep(2)
+            if self.server_task.done():
+                raise Exception(f"Server task failed: {self.server_task.exception()}")
 
             # Start client task
+            factory_logger.network("Creating client task")
             self.client_task = asyncio.create_task(self.run_client())
 
-            # Wait for both tasks to be ready
+            # Wait and verify both tasks
             await asyncio.sleep(1)
+
+            if self.server_task.done():
+                raise Exception(f"Server task failed: {self.server_task.exception()}")
+            if self.client_task.done():
+                raise Exception(f"Client task failed: {self.client_task.exception()}")
 
             if not self.client or not self.client.connected:
                 raise Exception("Failed to establish Modbus connection")
@@ -164,14 +171,18 @@ class ModbusManager:
             factory_logger.network(f"Modbus startup error: {str(e)}", "error")
 
             # Cancel tasks
-            if self.server_task:
+            if self.server_task and not self.server_task.done():
                 self.server_task.cancel()
-            if self.client_task:
+            if self.client_task and not self.client_task.done():
                 self.client_task.cancel()
 
             # Wait for tasks to complete
             await asyncio.gather(
-                *[t for t in [self.server_task, self.client_task] if t],
+                *[
+                    t
+                    for t in [self.server_task, self.client_task]
+                    if t and not t.done()
+                ],
                 return_exceptions=True,
             )
 
@@ -230,8 +241,15 @@ class ModbusManager:
             return False
 
         try:
-            result = await self.client.write_register(address, value, slave=1)
-            return not result.isError() if hasattr(result, "isError") else False
+            # Ensure address is within valid range
+            if 0 <= address < 10000:
+                result = await self.client.write_register(address, value, slave=1)
+                return not result.isError() if hasattr(result, "isError") else False
+            else:
+                factory_logger.network(
+                    f"Invalid register address: {address}", "error"
+                )
+                return False
         except Exception as e:
             factory_logger.network(
                 f"Error writing to register {address}: {str(e)}", "error"
@@ -369,18 +387,30 @@ class OPCUAManager:
                     pass
             raise
 
-    async def create_variable(self, name: str, initial_value: Any):
-        """Create OPC UA variable"""
+    async def create_variable(self, name: str, initial_value: Any, var_type: str):
+        """Create OPC UA variable with proper type"""
         if not self.running:
-            factory_logger.network(
-                "Cannot create variable - OPC UA server not running", "error"
-            )
             return None
 
         try:
-            # Create variable under root node
+            # Map Python types to OPC UA types
+            type_mapping = {
+                "Boolean": ua.VariantType.Boolean,
+                "Double": ua.VariantType.Double,
+                "String": ua.VariantType.String,
+            }
+
+            # Get OPC UA type
+            ua_type = type_mapping.get(var_type)
+            if not ua_type:
+                raise ValueError(f"Unsupported variable type: {var_type}")
+
+            # Create variable node
             node = await self.server.nodes.objects.add_variable(
-                f"ns={self.namespace_idx};s={name}", name, initial_value
+                ua.NodeId(name, self.server.nodes.objects.nodeid.NamespaceIndex),
+                name,
+                initial_value,
+                ua_type,
             )
             self.variables[name] = node
             return node
@@ -392,23 +422,60 @@ class OPCUAManager:
             return None
 
     async def update_variable(self, name: str, value: Any):
-        """Update OPC UA variable value"""
+        """Update OPC UA variable value with type checking"""
         if not self.running:
             return
 
         try:
+            # Extract value from dictionary if needed
+            if isinstance(value, dict):
+                value = value.get("value", False)
+
+            # Determine and convert to proper type
+            if name.startswith("proximity_"):
+                value = bool(value)
+                var_type = "Boolean"
+            elif name.startswith("level_"):
+                value = float(value)
+                var_type = "Double"
+            else:
+                # Default string handling
+                value = str(value)
+                var_type = "String"
+
             if name not in self.variables:
-                node = await self.create_variable(name, value)
+                # Create new variable with determined type
+                node = await self.create_variable(name, value, var_type)
                 if not node:
                     return
             else:
                 node = self.variables[name]
+
             await node.write_value(value)
 
         except Exception as e:
             factory_logger.network(
                 f"Error updating OPC UA variable {name}: {str(e)}", "error"
             )
+
+    async def read_variable(self, name: str) -> Any:
+        """Read OPC UA variable value"""
+        if not self.running:
+            return None
+
+        try:
+            if name not in self.variables:
+                return None
+
+            node = self.variables[name]
+            value = await node.read_value()
+            return value
+
+        except Exception as e:
+            factory_logger.network(
+                f"Error reading OPC UA variable {name}: {str(e)}", "error"
+            )
+            return None
 
     async def stop(self):
         """Stop OPC UA server"""

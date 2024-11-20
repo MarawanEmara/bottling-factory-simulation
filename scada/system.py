@@ -95,7 +95,21 @@ class SCADASystem:
                 # Check for stale data
                 for device_id, state in self.device_states.items():
                     try:
-                        last_update = datetime.fromisoformat(state.get("timestamp"))
+                        # Handle different timestamp formats/types
+                        timestamp = state.get("timestamp")
+                        if isinstance(timestamp, (int, float)):
+                            # Convert Unix timestamp to datetime
+                            last_update = datetime.fromtimestamp(timestamp)
+                        elif isinstance(timestamp, str):
+                            # Parse ISO format string
+                            last_update = datetime.fromisoformat(timestamp)
+                        elif isinstance(timestamp, datetime):
+                            # Already datetime object
+                            last_update = timestamp
+                        else:
+                            # Skip if timestamp is invalid
+                            continue
+
                         if (
                             current_time - last_update
                         ).total_seconds() > self.monitoring_params[
@@ -107,7 +121,8 @@ class SCADASystem:
                             )
                     except Exception as e:
                         factory_logger.system(
-                            f"Error checking stale data: {str(e)}", "error"
+                            f"Error checking stale data for {device_id}: {str(e)}",
+                            "error",
                         )
 
                 await asyncio.sleep(1)
@@ -210,32 +225,21 @@ class SCADASystem:
         """Process incoming sensor data"""
         try:
             sensor_id = data.get("sensor_id")
-            sensor_type = data.get("type")
             value = data.get("value")
 
-            # Check for critical values
-            if sensor_type == "level":
-                if value > self.monitoring_params["level_threshold_high"]:
-                    await self._create_alarm(
-                        "HIGH_LEVEL",
-                        f"High level detected in {sensor_id}: {value}",
-                        "warning",
-                    )
-                elif value < self.monitoring_params["level_threshold_low"]:
-                    await self._create_alarm(
-                        "LOW_LEVEL",
-                        f"Low level detected in {sensor_id}: {value}",
-                        "warning",
-                    )
+            # Extract value from dictionary if needed
+            if isinstance(value, dict):
+                value = value.get("value", False)
 
-            # Update OPC UA variable if server is running
+            # Convert to appropriate type based on sensor ID
+            if sensor_id.startswith("proximity_"):
+                value = bool(value)
+            elif sensor_id.startswith("level_"):
+                value = float(value)
+
+            # Update OPC UA variable with properly typed value
             if self.opcua.running:
-                try:
-                    await self.opcua.update_variable(sensor_id, value)
-                except Exception as e:
-                    factory_logger.system(
-                        f"Error updating OPC UA variable: {str(e)}", "error"
-                    )
+                await self.opcua.update_variable(sensor_id, value)
 
         except Exception as e:
             factory_logger.system(f"Error processing sensor data: {str(e)}", "error")
