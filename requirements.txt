@@ -1,6 +1,12 @@
-aiomqtt==2.3.0
+
 asyncua==1.1.5
 coloredlogs==15.0.1
-fastapi==0.115.4
+config==0.5.1
+devices==0.0.1
+fastapi==0.115.5
+network==0.1
+paho_mqtt==2.1.0
 pymodbus==3.7.4
-uvicorn==0.32.0
+scapy==2.6.1
+utils==1.0.2
+uvicorn==0.32.1
