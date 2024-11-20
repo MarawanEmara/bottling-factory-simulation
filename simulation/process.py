@@ -46,6 +46,25 @@ class BottlingProcess:
             "labeling": asyncio.Lock(),
         }
 
+    async def initialize(self):
+        """Initialize the bottling process"""
+        try:
+            # Initialize station locks
+            self.station_locks = {
+                "filling": asyncio.Lock(),
+                "capping": asyncio.Lock(),
+                "labeling": asyncio.Lock(),
+            }
+            
+            # Clear any existing bottles
+            self.bottles = {}
+            
+            factory_logger.process("Bottling process initialized")
+            
+        except Exception as e:
+            factory_logger.process(f"Error initializing bottling process: {str(e)}", "error")
+            raise
+
     async def process_bottle(self, bottle: Bottle):
         """Process a bottle through all stations"""
         try:

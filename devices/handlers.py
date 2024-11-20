@@ -9,17 +9,26 @@ class DeviceHandler:
         self.scada = scada
         self.modbus = modbus
         self.opcua = opcua
-        self.plcs = {
-            "filling": FillingPLC(modbus, opcua),
-            "capping": CappingPLC(modbus, opcua),
-            "labeling": LabelingPLC(modbus, opcua),
-            "conveyor": ConveyorPLC(modbus, opcua)
-        }
+        self.plcs = {}
 
     async def initialize(self):
         """Initialize all PLCs"""
-        for plc in self.plcs.values():
-            await plc.initialize()
+        try:
+            self.plcs = {
+                "filling": FillingPLC(self.modbus, self.opcua),
+                "capping": CappingPLC(self.modbus, self.opcua),
+                "labeling": LabelingPLC(self.modbus, self.opcua),
+                "conveyor": ConveyorPLC(self.modbus, self.opcua)
+            }
+
+            # Initialize each PLC
+            for plc in self.plcs.values():
+                await plc.initialize()
+
+            factory_logger.system("Device handler initialized successfully")
+        except Exception as e:
+            factory_logger.system(f"Error initializing device handler: {str(e)}", "error")
+            raise
 
     async def handle_sensor_data(self, sensor_id: str, value: Any):
         """Handle incoming sensor data"""
@@ -70,7 +79,10 @@ class DeviceHandler:
         """Process data from Modbus registers"""
         sensor_id = self._get_sensor_id_from_register(register)
         if sensor_id:
-            await self.handle_sensor_data(sensor_id, value)
+            # Read the value through Modbus
+            value = self.modbus.read_register(register)
+            if value is not None:
+                await self.handle_sensor_data(sensor_id, value)
 
     def _get_sensor_id_from_register(self, register: int) -> str:
         # Map Modbus registers to sensor IDs

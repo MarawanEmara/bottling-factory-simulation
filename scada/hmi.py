@@ -1,7 +1,8 @@
 # scada/hmi.py
 
-from fastapi import FastAPI, WebSocket
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
+from utils.logging import factory_logger
 import asyncio
 import json
 from typing import Dict, Set
@@ -16,13 +17,60 @@ class HMIServer:
         self.factory = factory
         self.active_connections: Set[WebSocket] = set()
         self.update_interval = 0.1  # 100ms updates
+        self.server = None
+        self.broadcast_task = None
 
         self._setup_routes()
         self._setup_websocket()
         self.app.mount("/static", StaticFiles(directory="static"), name="static")
 
-        # Start broadcast task
-        asyncio.create_task(self._broadcast_updates())
+    async def start(self):
+        """Start the HMI server"""
+        try:
+            # Start broadcast task
+            self.broadcast_task = asyncio.create_task(self._broadcast_updates())
+
+            # Configure server
+            config = uvicorn.Config(
+                self.app,
+                host="127.0.0.1",
+                port=8001,  # Different port from API server
+                loop="asyncio",
+            )
+            self.server = uvicorn.Server(config)
+
+            # Start server
+            await self.server.serve()
+
+        except Exception as e:
+            factory_logger.system(f"Error starting HMI server: {str(e)}", "error")
+            raise
+
+    async def shutdown(self):
+        """Shutdown the HMI server"""
+        try:
+            # Cancel broadcast task
+            if self.broadcast_task:
+                self.broadcast_task.cancel()
+                try:
+                    await self.broadcast_task
+                except asyncio.CancelledError:
+                    pass
+
+            # Close all websocket connections
+            for connection in self.active_connections:
+                await connection.close()
+            self.active_connections.clear()
+
+            # Shutdown server
+            if self.server:
+                self.server.should_exit = True
+                await self.server.shutdown()
+
+            factory_logger.system("HMI server shutdown complete")
+
+        except Exception as e:
+            factory_logger.system(f"Error shutting down HMI server: {str(e)}", "error")
 
     def _setup_websocket(self):
         @self.app.websocket("/ws")
@@ -167,11 +215,3 @@ class HMIServer:
                         self.active_connections.remove(connection)
 
             await asyncio.sleep(self.update_interval)
-
-    def start(self, host: str = "localhost", port: int = 8000):
-        """Start the HMI server"""
-        # Start update broadcast task
-        asyncio.create_task(self._broadcast_updates())
-
-        # Start FastAPI server
-        uvicorn.run(self.app, host=host, port=port)

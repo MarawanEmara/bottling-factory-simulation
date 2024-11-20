@@ -11,13 +11,16 @@ class SimulationConfig:
         self.FILL_TIME = 3.0
         self.CAP_TIME = 2.0
         self.LABEL_TIME = 2.5
-        self.BOTTLE_INTERVAL = 2.0  # Time between new bottles
-        self.SIMULATION_SPEED = 1.0  # 1.0 = real-time, 2.0 = 2x speed, etc.
+        self.BOTTLE_INTERVAL = 2.0
+        self.SIMULATION_SPEED = 1.0
 
         # Network settings
-        self.MODBUS_PORT = 5020
+        self.MODBUS_SERVER_PORT = 5020
+        self.MODBUS_CLIENT_PORT = 5022
         self.MQTT_BROKER = "localhost"
         self.MQTT_PORT = 1883
+        self.OPCUA_PORT = 4840
+        self.MODBUS_SERVER_PORT_ALT = 5020
 
 
 class LayoutConfig:

@@ -5,37 +5,48 @@ import json
 import time
 from datetime import datetime
 from utils.logging import factory_logger
+import uvicorn
 
 
 class DashboardAPI:
     def __init__(self):
         self.app = FastAPI()
-        self.active_connections: list[WebSocket] = []
-        self.factory = None  # Will be set when initializing
+        self.factory = None
+        self.server = None
+        self._setup_routes()
 
-        # Initialize system status
-        self.system_status = {
-            "modbus": False,
-            "mqtt": False,
-            "opcua": False,
-            "last_update": datetime.now().isoformat(),
-        }
+    def set_factory(self, factory):
+        """Set factory instance after initialization"""
+        self.factory = factory
 
-        # Configure CORS
-        self.app.add_middleware(
-            CORSMiddleware,
-            allow_origins=["http://localhost:3000"],
-            allow_credentials=True,
-            allow_methods=["*"],
-            allow_headers=["*"],
-        )
+    async def start(self):
+        """Start the API server"""
+        try:
+            # Configure server
+            config = uvicorn.Config(
+                self.app, host="127.0.0.1", port=8000, loop="asyncio"
+            )
+            self.server = uvicorn.Server(config)
+            # Start server
+            await self.server.serve()
+        except Exception as e:
+            factory_logger.system(f"Error starting API server: {str(e)}", "error")
+            raise
 
-        self.setup_routes()
+    async def shutdown(self):
+        """Shutdown the API server"""
+        try:
+            if self.server:
+                self.server.should_exit = True
+                await self.server.shutdown()
+                factory_logger.system("API server shutdown complete")
+        except Exception as e:
+            factory_logger.system(f"Error shutting down API server: {str(e)}", "error")
 
-    def setup_routes(self):
+    def _setup_routes(self):
         @self.app.get("/")
         async def root():
-            return {"message": "Factory Dashboard API"}
+            return {"status": "API Server Running"}
 
         @self.app.websocket("/ws")
         async def websocket_endpoint(websocket: WebSocket):
@@ -53,36 +64,58 @@ class DashboardAPI:
                         bottle_states[state] = bottle_states.get(state, 0) + 1
 
                     # Send data to client
-                    await websocket.send_json({
-                        "process": {
-                            **status,
-                            "stations": {
-                                "filling": {
-                                    "busy": status["stations"]["filling"]["busy"],
-                                    "level": status["stations"]["filling"]["level"],
-                                    "valve_state": status["stations"]["filling"]["valve_state"]
+                    await websocket.send_json(
+                        {
+                            "process": {
+                                **status,
+                                "stations": {
+                                    "filling": {
+                                        "busy": status["stations"]["filling"]["busy"],
+                                        "level": status["stations"]["filling"]["level"],
+                                        "valve_state": status["stations"]["filling"][
+                                            "valve_state"
+                                        ],
+                                    },
+                                    "capping": {
+                                        "busy": status["stations"]["capping"]["busy"],
+                                        "actuator_state": status["stations"]["capping"][
+                                            "actuator_state"
+                                        ],
+                                    },
+                                    "labeling": {
+                                        "busy": status["stations"]["labeling"]["busy"],
+                                        "motor_speed": status["stations"]["labeling"][
+                                            "motor_speed"
+                                        ],
+                                    },
                                 },
-                                "capping": {
-                                    "busy": status["stations"]["capping"]["busy"],
-                                    "actuator_state": status["stations"]["capping"]["actuator_state"]
-                                },
-                                "labeling": {
-                                    "busy": status["stations"]["labeling"]["busy"],
-                                    "motor_speed": status["stations"]["labeling"]["motor_speed"]
-                                }
+                                "conveyor_speed": status["conveyor_speed"],
                             },
-                            "conveyor_speed": status["conveyor_speed"]
-                        },
-                        "bottleStates": bottle_states,
-                        "stats": {
-                            "throughput": self.factory.metrics["successful_bottles"] / ((time.time() - self.factory.start_time) / 60),
-                            "error_rate": self.factory.metrics["failed_bottles"] / (self.factory.metrics["successful_bottles"] + self.factory.metrics["failed_bottles"] or 1),
-                            "average_fill_level": self.factory.metrics["average_fill_level"],
-                            "average_labeling_speed": self.factory.metrics["average_labeling_speed"],
-                            "average_conveyor_speed": self.factory.metrics["average_conveyor_speed"],
-                            "station_utilization": self.factory.metrics["station_utilization"]
+                            "bottleStates": bottle_states,
+                            "stats": {
+                                "throughput": self.factory.metrics["successful_bottles"]
+                                / ((time.time() - self.factory.start_time) / 60),
+                                "error_rate": self.factory.metrics["failed_bottles"]
+                                / (
+                                    self.factory.metrics["successful_bottles"]
+                                    + self.factory.metrics["failed_bottles"]
+                                    or 1
+                                ),
+                                "average_fill_level": self.factory.metrics[
+                                    "average_fill_level"
+                                ],
+                                "average_labeling_speed": self.factory.metrics[
+                                    "average_labeling_speed"
+                                ],
+                                "average_conveyor_speed": self.factory.metrics[
+                                    "average_conveyor_speed"
+                                ],
+                                "station_utilization": self.factory.metrics[
+                                    "station_utilization"
+                                ],
+                            },
                         }
-                    })
+                    )
 
                     await asyncio.sleep(1)  # Update every second
 
@@ -94,7 +127,9 @@ class DashboardAPI:
 
         @self.app.get("/status")
         async def get_status():
-            return self.system_status
+            if not self.factory:
+                return {"error": "Factory not initialized"}
+            return self.factory.get_status()
 
         @self.app.get("/logs")
         async def get_logs():
@@ -134,10 +169,6 @@ class DashboardAPI:
             except Exception as e:
                 factory_logger.system(f"Control error: {str(e)}", "error")
                 return {"error": str(e)}, 500
-
-    def set_factory(self, factory):
-        """Set factory instance for control operations"""
-        self.factory = factory
 
     def update_status(self, protocol: str, connected: bool):
         """Update system status and broadcast to all clients"""

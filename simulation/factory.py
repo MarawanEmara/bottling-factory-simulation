@@ -20,49 +20,39 @@ from network.protocols import ModbusManager, OPCUAManager
 from scada.system import SCADASystem
 from simulation.process import BottlingProcess, Bottle, BottleState
 from utils.logging import factory_logger
+from network.monitor import protocol_monitor
 
 
 class BottlingFactory:
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, scada: SCADASystem, protocols: Dict):
         self.config = config.simulation
         self.layout = config.layout
-
-        # Initialize network protocols
-        self.modbus = ModbusManager(self.config.MODBUS_PORT)
-        self.opcua = OPCUAManager()
-        self.scada = SCADASystem(config)
+        self.scada = scada
+        self.protocols = protocols
+        self.modbus = protocols["modbus"]
+        self.opcua = protocols["opcua"]
 
         # Initialize components
         self.sensors = self._init_sensors()
         self.actuators = self._init_actuators()
 
+        # Initialize device handler
+        self.device_handler = DeviceHandler(
+            self.scada, 
+            self.protocols["modbus"], 
+            self.protocols["opcua"]
+        )
+
+        # Initialize process
+        self.process = BottlingProcess(self, config, self.device_handler)
+
         # Production tracking
         self.bottles_produced = 0
         self.bottles_in_progress = Queue()
-
-        # Control flags
         self.running = False
         self.stop_event = Event()
         self.start_time = time.time()
-
-        # Initialize device handler and process
-        self.device_handler = DeviceHandler(self.scada, self.modbus, self.opcua)
-        self.process = BottlingProcess(self, config, self.device_handler)
-
-        # Enhanced metrics tracking
-        self.metrics = {
-            "failed_bottles": 0,
-            "successful_bottles": 0,
-            "average_fill_level": 0,
-            "average_labeling_speed": 0,
-            "average_conveyor_speed": 0,
-            "station_utilization": {
-                "filling": 0,
-                "capping": 0,
-                "labeling": 0
-            },
-            "total_operation_time": 0
-        }
+        self.metrics = {"successful_bottles": 0, "failed_bottles": 0}
 
     def _init_sensors(self) -> Dict[str, Sensor]:
         """Initialize all sensors in the factory"""
@@ -89,6 +79,20 @@ class BottlingFactory:
             "labeling_motor": LabelingMotor("labeling_motor"),
         }
 
+    async def initialize(self):
+        """Initialize factory components"""
+        try:
+            # Initialize device handler
+            await self.device_handler.initialize()
+            
+            # Initialize process
+            await self.process.initialize()
+            
+            factory_logger.system("Factory initialization complete")
+        except Exception as e:
+            factory_logger.system(f"Factory initialization error: {str(e)}", "error")
+            raise
+
     async def start(self):
         """Start the factory simulation asynchronously"""
         if self.running:
@@ -98,11 +102,20 @@ class BottlingFactory:
         self.stop_event.clear()
         self.start_time = time.time()
 
-        # Start the conveyor
-        self.actuators["main_conveyor"].activate()
+        try:
+            # Start the Modbus server first
+            await self.modbus.start()
 
-        # Run simulation in background task
-        asyncio.create_task(self._run_simulation())
+            # Start the conveyor
+            self.actuators["main_conveyor"].activate()
+
+            # Run simulation in background task
+            asyncio.create_task(self._run_simulation())
+            
+        except Exception as e:
+            factory_logger.system(f"Error starting factory: {str(e)}", "error")
+            self.running = False
+            raise
 
     async def stop(self):
         """Stop the factory simulation"""
@@ -114,7 +127,7 @@ class BottlingFactory:
             actuator.deactivate()
 
     async def _run_simulation(self):
-        """Main simulation loop"""
+        """Main simulation loop with protocol monitoring"""
         last_bottle_time = time.time()
 
         while not self.stop_event.is_set():
@@ -123,18 +136,24 @@ class BottlingFactory:
             # Add new bottle if it's time
             if current_time - last_bottle_time >= self.config.BOTTLE_INTERVAL:
                 self._add_new_bottle()
-                factory_logger.process(
-                    f"New bottle added: bottle_{self.bottles_produced}"
+                # Record MQTT event for new bottle
+                protocol_monitor.record_event(
+                    "mqtt",
+                    "factory",
+                    "scada",
+                    "new_bottle",
+                    {"bottle_id": f"bottle_{self.bottles_produced}"}
                 )
                 last_bottle_time = current_time
-
-            # Update sensor readings
-            self._update_sensors()
 
             # Process bottles at stations
             await self._process_stations()
 
-            # Simulate at specified speed
+            # Save packet captures periodically
+            if self.bottles_produced % 10 == 0:  # Every 10 bottles
+                self.modbus.capture.save()
+                self.opcua.capture.save()
+
             await asyncio.sleep(0.1 / self.config.SIMULATION_SPEED)
 
     def _add_new_bottle(self):
