@@ -95,28 +95,66 @@ The system implements three industrial protocols:
 The bottling process follows this sequence:
 
 ```mermaid
-sequenceDiagram
-    participant PS as Proximity Sensor
-    participant FP as Filling PLC
-    participant CP as Capping PLC
-    participant LP as Labeling PLC
-    participant SC as SCADA
+flowchart TB
+    Start([Start]) --> PS1{Bottle Detected?}
+    PS1 -->|"Modbus TCP"| Fill
 
-    PS->>FP: Bottle Detected (Modbus TCP)
-    FP->>SC: Start Fill Operation (OPC UA)
-    Note over FP: Monitors Level Sensor
-    FP->>SC: Fill Complete (OPC UA)
+    subgraph Filling ["Filling Process"]
+        Fill[Start Fill] -->|"OPC UA"| SCADA1[SCADA Start Fill]
+        SCADA1 --> OpenV[Open Valve]
+        OpenV -->|"Modbus TCP"| MonitorL[Monitor Level]
+        MonitorL --> LevelOK{Level OK?}
+        LevelOK -->|No| MonitorL
+        LevelOK -->|Yes| CloseV[Close Valve]
+        CloseV -->|"OPC UA"| FillComplete[Fill Complete]
+    end
 
-    PS->>CP: Bottle at Capping (Modbus TCP)
-    CP->>SC: Start Cap Operation (OPC UA)
-    Note over CP: Activates Capping Actuator
-    CP->>SC: Cap Complete (OPC UA)
+    FillComplete --> PS2{Bottle at Capper?}
+    PS2 -->|"Modbus TCP"| Cap
 
-    PS->>LP: Bottle at Labeling (Modbus TCP)
-    LP->>SC: Start Label Operation (OPC UA)
-    Note over LP: Controls Label Motor
-    LP->>SC: Label Complete (OPC UA)
+    subgraph Capping ["Capping Process"]
+        Cap[Start Cap] -->|"OPC UA"| SCADA2[SCADA Start Cap]
+        SCADA2 -->|"Modbus TCP"| ActCap[Activate Capper]
+        ActCap --> CapOK{Cap Applied?}
+        CapOK -->|No| ActCap
+        CapOK -->|Yes| CapComplete[Cap Complete]
+        CapComplete -->|"OPC UA"| CapDone[Cap Done]
+    end
 
+    CapDone --> PS3{Bottle at Labeler?}
+    PS3 -->|"Modbus TCP"| Label
+
+    subgraph Labeling ["Labeling Process"]
+        Label[Start Label] -->|"OPC UA"| SCADA3[SCADA Start Label]
+        SCADA3 -->|"Modbus TCP"| ActLabel[Activate Labeler]
+        ActLabel --> LabelOK{Label Applied?}
+        LabelOK -->|No| ActLabel
+        LabelOK -->|Yes| LabelComplete[Label Complete]
+        LabelComplete -->|"OPC UA"| LabelDone[Label Done]
+    end
+
+    LabelDone --> End([End])
+
+    subgraph SCADA ["SCADA System"]
+        HMI[HMI Interface]
+        SCADA_System[SCADA Controller]
+        HMI <-->|"OPC UA"| SCADA_System
+    end
+
+    SCADA_System -.->|"OPC UA"| SCADA1
+    SCADA_System -.->|"OPC UA"| SCADA2
+    SCADA_System -.->|"OPC UA"| SCADA3
+
+    %% Styling
+    classDef process fill:#bbf,stroke:#333,stroke-width:2px
+    classDef decision fill:#fbb,stroke:#333,stroke-width:2px
+    classDef scada fill:#dbf,stroke:#333,stroke-width:2px
+    classDef endpoint fill:#dfd,stroke:#333,stroke-width:2px
+
+    class Fill,Cap,Label,ActCap,ActLabel,OpenV,CloseV,MonitorL process
+    class PS1,PS2,PS3,LevelOK,CapOK,LabelOK decision
+    class SCADA1,SCADA2,SCADA3,SCADA_System,HMI scada
+    class Start,End endpoint
 ```
 
 ## Features
