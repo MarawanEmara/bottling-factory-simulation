@@ -16,6 +16,7 @@ from pymodbus.datastore import (
     ModbusServerContext,
 )
 from pymodbus.server import StartAsyncTcpServer
+import json
 
 
 class PacketCapture:
@@ -24,34 +25,56 @@ class PacketCapture:
         self.capture_file = Path("captures") / capture_file
         # Create captures directory if it doesn't exist
         self.capture_file.parent.mkdir(exist_ok=True)
+        # Add packet count for periodic saving
+        self.packet_count = 0
+        self.MAX_PACKETS_BEFORE_SAVE = 1000
 
-    def capture_packet(self, protocol: str, src: str, dst: str, data: bytes):
+    def capture_packet(self, protocol: str, src: str, dst: str, data: Any):
         """Capture a network packet with proper encapsulation"""
         try:
-            # Convert hostname/port combinations to IP addresses
-            src_ip = "127.0.0.1"  # Use localhost for simulation
-            dst_ip = "127.0.0.1"  # Use localhost for simulation
+            # Convert data to bytes if it isn't already
+            if isinstance(data, dict):
+                data = json.dumps(data).encode()
+            elif not isinstance(data, bytes):
+                data = str(data).encode()
+
+            # Map protocols to ports
+            protocol_ports = {"modbus": 502, "mqtt": 1883, "opcua": 4840}
+
+            sport = protocol_ports.get(protocol, 0)
+            dport = sport
 
             # Create proper packet structure
             packet = (
                 Ether()
-                / IP(src=src_ip, dst=dst_ip)
-                / TCP(sport=502, dport=502)
+                / IP(src=src, dst=dst)
+                / TCP(sport=sport, dport=dport)
                 / Raw(load=data)
             )
             self.packets.append(packet)
+            self.packet_count += 1
+
+            # Automatically save if we've accumulated enough packets
+            if self.packet_count >= self.MAX_PACKETS_BEFORE_SAVE:
+                self.save()
+                self.packet_count = 0
 
         except Exception as e:
-            factory_logger.network(f"Error capturing packet: {str(e)}", "error")
+            factory_logger.network(
+                f"Error capturing {protocol} packet: {str(e)}", "error"
+            )
 
     def save(self):
         """Save captured packets to file"""
         if self.packets:
             try:
-                wrpcap(str(self.capture_file), self.packets)
+                # Append to existing pcap if it exists
+                wrpcap(str(self.capture_file), self.packets, append=True)
                 factory_logger.network(
                     f"Saved {len(self.packets)} packets to {self.capture_file}"
                 )
+                # Clear packets after saving
+                self.packets = []
             except Exception as e:
                 factory_logger.network(
                     f"Error saving packet capture: {str(e)}", "error"
@@ -235,24 +258,26 @@ class ModbusManager:
             )
             return None
 
-    async def update_register(self, address: int, value: int):
-        """Write to Modbus register"""
-        if not self.running or not self.client.connected:
-            return False
-
+    async def update_register(self, register: int, value: int):
+        """Update Modbus register and capture packet"""
         try:
-            # Ensure address is within valid range
-            if 0 <= address < 10000:
-                result = await self.client.write_register(address, value, slave=1)
-                return not result.isError() if hasattr(result, "isError") else False
-            else:
-                factory_logger.network(f"Invalid register address: {address}", "error")
-                return False
+            if self.client and self.client.connected:
+                # Create Modbus packet data
+                data = {
+                    "function": "write_register",
+                    "register": register,
+                    "value": value
+                }
+                # Capture packet before sending
+                self.capture.capture_packet(
+                    "modbus",
+                    "127.0.0.1",
+                    "127.0.0.1",
+                    data
+                )
+                await self.client.write_register(register, value)
         except Exception as e:
-            factory_logger.network(
-                f"Error writing to register {address}: {str(e)}", "error"
-            )
-            return False
+            factory_logger.network(f"Error updating register: {str(e)}", "error")
 
 
 class MQTTManager:
@@ -318,14 +343,20 @@ class MQTTManager:
     async def publish(self, topic: str, payload: Any):
         """Publish MQTT message and capture packet"""
         if self.running:
-            self.client.publish(topic, str(payload))
-            # Capture MQTT packet
-            self.capture.capture_packet(
-                "mqtt",
-                "127.0.0.1",
-                "127.0.0.1",
-                bytes(f"PUB {topic} {payload}", "utf-8"),
-            )
+            try:
+                # Capture packet before publishing
+                self.capture.capture_packet(
+                    "mqtt",
+                    "127.0.0.1",
+                    self.broker,
+                    {
+                        "topic": topic,
+                        "payload": payload
+                    }
+                )
+                self.client.publish(topic, str(payload))
+            except Exception as e:
+                factory_logger.network(f"MQTT publish error: {str(e)}", "error")
 
     def _on_message(self, client, userdata, message):
         """Handle incoming MQTT messages"""
@@ -427,11 +458,22 @@ class OPCUAManager:
             return None
 
     async def update_variable(self, name: str, value: Any):
-        """Update OPC UA variable value with type checking"""
+        """Update OPC UA variable value and capture packet"""
         if not self.running:
             return
 
         try:
+            # Capture packet before updating
+            self.capture.capture_packet(
+                "opcua",
+                "127.0.0.1",
+                "127.0.0.1",
+                {
+                    "node": name,
+                    "value": value
+                }
+            )
+            
             # Extract value from dictionary if needed
             if isinstance(value, dict):
                 value = value.get("value", False)

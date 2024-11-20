@@ -135,7 +135,9 @@ class BottlingFactory:
     async def _run_simulation(self):
         """Main simulation loop"""
         last_bottle_time = time.time()
+        last_capture_save = time.time()
         conveyor_speed = 1.0  # units per second
+        CAPTURE_SAVE_INTERVAL = 60
 
         while not self.stop_event.is_set():
             current_time = time.time()
@@ -175,6 +177,12 @@ class BottlingFactory:
             if self.bottles_produced % 10 == 0:  # Every 10 bottles
                 self.modbus.capture.save()
                 self.opcua.capture.save()
+
+            if current_time - last_capture_save >= CAPTURE_SAVE_INTERVAL:
+                for protocol in self.protocols.values():
+                    if hasattr(protocol, "capture"):
+                        protocol.capture.save()
+                last_capture_save = current_time
 
             await asyncio.sleep(0.1 / self.simulation_config.SIMULATION_SPEED)
 
