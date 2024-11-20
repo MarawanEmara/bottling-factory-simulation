@@ -63,7 +63,6 @@ graph TB
 - Sensors:
   - Proximity sensors for bottle detection
   - Level sensors for fill monitoring
-  - Temperature sensors for process monitoring
 - Actuators:
   - Control valves
   - Conveyor motors
